@@ -12,21 +12,22 @@ typedef struct {
     double open, high, low, close, volume;
 } StockData;
 
-
+/* Serial on purpose: works on a single day (O(1)), no need for parallel. */
 double daily_average(StockData s) {
     return (s.open + s.high + s.low + s.close) / 4.0;
 }
 
-
-//Also SERIAL There's no loop inside to parallelize.
-
+/* Serial on purpose: simple formula between two numbers (O(1)). */
 double daily_return(double prev_close, double curr_close) {
     if (prev_close == 0.0) return 0.0;
     return (curr_close - prev_close) / prev_close;
 }
 
-
-//   SERIAL by design:
+/*
+  Serial per file:
+  - Reads one CSV file line by line into the array.
+  - Each thread will call this on a different file, so the function stays serial.
+*/
 int read_csv(const char *filename, StockData *data, int max_days) {
     FILE *file = fopen(filename, "r");
     if (!file) {
@@ -74,34 +75,33 @@ int main(int argc, char *argv[]) {
 
     int num_files = argc - file_start_index;
 
-    // OpenMP-specific: number of threads available on the system.
     int threads   = omp_get_max_threads();
 
-    
-    // reductionOpenMP:
-    //   - give each thread a private copy of these variables
-    //   - efficiently merge them at the end of the parallel loop
-    //   - avoid explicit locks and minimize synchronization overhead.
+    /*
+      Global accumulators:
+      - All files contribute to these values.
+      - We will combine them using OpenMP reduction.
+    */
     long long total_records   = 0;
     long long total_returns   = 0;
     double    sum_prices      = 0.0;
     double    sum_returns     = 0.0;
     double    sum_returns_sq  = 0.0;
 
-    double start_time = omp_get_wtime();   // OpenMP wall-clock timer
+    double start_time = omp_get_wtime();   // Measure parallel region time
 
-   
+    
     #pragma omp parallel for reduction(+:total_records, total_returns, sum_prices, sum_returns, sum_returns_sq) schedule(dynamic)
     for (int f = file_start_index; f < argc; f++) {
         const char *filename = argv[f];
 
-       
+        // Each thread has its own buffer (no sharing).
         StockData *data = malloc(sizeof(StockData) * max_days);
         if (!data) {
             continue;
         }
 
-    
+        // Read this file (serial inside the thread, but different files are parallel).
         int n = read_csv(filename, data, max_days);
         if (n > 1) {
             long long local_records   = n;
@@ -110,7 +110,7 @@ int main(int argc, char *argv[]) {
             double    local_ret_sum   = 0.0;
             double    local_ret_sq    = 0.0;
 
-         
+            // Serial loops inside the thread: outer loop is already parallel.
             for (int i = 0; i < n; i++) {
                 local_price_sum += daily_average(data[i]);
             }
@@ -121,7 +121,11 @@ int main(int argc, char *argv[]) {
                 local_ret_sq   += r * r;
             }
 
-       
+            /*
+              These additions are part of the reduction:
+              -   each thread has a private copy.
+              - OpenMP merges them when the loop finishes.
+            */
             total_records   += local_records;
             total_returns   += local_returns;
             sum_prices      += local_price_sum;
@@ -129,13 +133,13 @@ int main(int argc, char *argv[]) {
             sum_returns_sq  += local_ret_sq;
         }
 
-        free(data); // Per-thread memory cleanup
+        free(data); // Free per-thread memory
     }
 
     double end_time = omp_get_wtime();
     double elapsed  = end_time - start_time;
 
-
+   
     if (total_records == 0 || total_returns == 0) {
         printf("No sufficient data loaded.\n");
         return 1;

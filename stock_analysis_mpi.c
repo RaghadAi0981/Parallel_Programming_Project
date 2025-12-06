@@ -137,5 +137,4 @@ int main(int argc, char *argv[]) {
     if (rank == 0) free(data);
 
     MPI_Finalize();
-    return 0;
-}
+    return 
