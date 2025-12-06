@@ -27,7 +27,6 @@ double daily_return(double prev_close, double curr_close) {
 
 
 //   SERIAL by design:
- 
 int read_csv(const char *filename, StockData *data, int max_days) {
     FILE *file = fopen(filename, "r");
     if (!file) {
