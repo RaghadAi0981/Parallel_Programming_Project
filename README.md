@@ -7,7 +7,7 @@
 Parallel_Programming_Project/
 │
 ├── 📁 stocks/                      → Contains all stock CSV files
-│     └── ...                       
+│     └── ...                       → Contains Company Names & Their Stocks
 │
 ├── 📄 Serial_Version.c             → Serial implementation
 │
