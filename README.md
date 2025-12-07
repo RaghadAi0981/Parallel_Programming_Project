@@ -1,2 +1,18 @@
 # Parallel_Programming_Project
 **[Open Overleaf Project](https://www.overleaf.com/3642769321gtqjmvxhjvkr#8b8c3d)**
+Parallel_Programming_Project/
+│
+├── 📁 stocks/                      → Contains all stock CSV  files
+│     └── ...                       
+│
+├── 📄 Serial_Version.c             → Serial implementation 
+│
+├── 📄 openMP_Version.c             → OpenMP parallel implementation 
+│
+├── 📄 Mpi_version.c                → MPI distributed implementation 
+│
+├── 📄 stock_data.csv               → Dataset used by Serial / OpenMP / MPI versions
+│
+├── 📄 README.md                    → Main documentation file for the project
+│
+└── 🗂️ .DS_Store                     → macOS system file (not part of the project logic)
