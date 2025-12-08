@@ -20,4 +20,7 @@ Parallel_Programming_Project/
 ├── 📄 README.md                    → Main documentation file
 │
 └── 🗂️ .DS_Store                    → macOS system file
+│
+├── 📁 shell script/                      → Contains all shell script files
+│     └── ...    
 ```
