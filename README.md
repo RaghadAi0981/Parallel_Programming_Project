@@ -15,7 +15,6 @@ Parallel_Programming_Project/
 │
 ├── 📄 Mpi_version.c                → MPI distributed implementation
 │
-├── 📄 stock_data.csv               → Dataset used by Serial / OpenMP / MPI versions
 │
 ├── 📄 README.md                    → Main documentation file
 │
