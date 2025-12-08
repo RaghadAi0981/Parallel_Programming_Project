@@ -15,11 +15,10 @@ Parallel_Programming_Project/
 │
 ├── 📄 Mpi_version.c                → MPI distributed implementation
 │
-│
 ├── 📄 README.md                    → Main documentation file
 │
 └── 🗂️ .DS_Store                    → macOS system file
 │
-├── 📁 shell script/                      → Contains all shell script files
+├── 📁 shell script/                → Contains all shell script files
 │     └── ...    
 ```
