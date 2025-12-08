@@ -3,173 +3,355 @@
 #include <string.h>
 #include <math.h>
 #include <omp.h>
+#include <dirent.h>
 
 #define MAX_LINE_LEN 256
-#define MAX_DAYS     1000000 
+#define MIN_PRICE 0.01
+#define MAX_PRICE 10000.0
+#define MIN_YEAR_GLOBAL 1900
+#define MAX_YEAR_GLOBAL 2100
+#define MAX_DECADES (((MAX_YEAR_GLOBAL - MIN_YEAR_GLOBAL) / 10) + 1)
 
 typedef struct {
     char date[20];
     double open, high, low, close, volume;
 } StockData;
 
-/* Serial on purpose: works on a single day (O(1)), no need for parallel. */
-double daily_average(StockData s) {
-    return (s.open + s.high + s.low + s.close) / 4.0;
+// Safe strdup implementation (for portability)
+static char *my_strdup(const char *s) {
+    size_t len = strlen(s) + 1;
+    char *p = (char *)malloc(len);
+    if (p) memcpy(p, s, len);
+    return p;
 }
 
-/* Serial on purpose: simple formula between two numbers (O(1)). */
-double daily_return(double prev_close, double curr_close) {
-    if (prev_close == 0.0) return 0.0;
-    return (curr_close - prev_close) / prev_close;
-}
-
-/*
-  Serial per file:
-  - Reads one CSV file line by line into the array.
-  - Each thread will call this on a different file, so the function stays serial.
-*/
-int read_csv(const char *filename, StockData *data, int max_days) {
+// Read CSV file into dynamic array of StockData
+// Expected format: date,open,high,low,close,adj_close,volume
+int read_csv(const char *filename, StockData **data_out) {
     FILE *file = fopen(filename, "r");
     if (!file) {
+        fprintf(stderr, "Cannot open file: %s\n", filename);
+        *data_out = NULL;
         return 0;
     }
 
     char line[MAX_LINE_LEN];
-    int count = 0;
+    int count = 0, capacity = 0;
+    StockData *data = NULL;
 
+    // Skip header
     fgets(line, sizeof(line), file);
 
-    while (fgets(line, sizeof(line), file) && count < max_days) {
-        if (sscanf(line, "%19[^,],%lf,%lf,%lf,%lf,%lf",
-                   data[count].date,
-                   &data[count].open,
-                   &data[count].high,
-                   &data[count].low,
-                   &data[count].close,
-                   &data[count].volume) == 6) {
+    while (fgets(line, sizeof(line), file)) {
+        if (count >= capacity) {
+            int new_cap = (capacity == 0) ? 1024 : capacity * 2;
+            StockData *tmp = realloc(data, new_cap * sizeof(StockData));
+            if (!tmp) {
+                fprintf(stderr, "Memory allocation failed in read_csv\n");
+                free(data);
+                fclose(file);
+                *data_out = NULL;
+                return 0;
+            }
+            data = tmp;
+            capacity = new_cap;
+        }
+
+        double adj_temp;
+        int parsed = sscanf(
+            line,
+            "%19[^,],%lf,%lf,%lf,%lf,%lf,%lf",
+            data[count].date,
+            &data[count].open,
+            &data[count].high,
+            &data[count].low,
+            &data[count].close,
+            &adj_temp,
+            &data[count].volume
+        );
+
+        if (parsed == 7) {
             count++;
         }
     }
 
     fclose(file);
+    *data_out = data;
     return count;
 }
 
 int main(int argc, char *argv[]) {
-    int max_days = MAX_DAYS;
-    int file_start_index = 1;
 
-    if (argc >= 2) {
-        char *endptr;
-        long tmp = strtol(argv[1], &endptr, 10);
-        if (*endptr == '\0' && tmp > 0) {
-            max_days = (int)tmp;
-            file_start_index = 2;
-        }
-    }
-
-    if (file_start_index >= argc) {
-        printf("Usage: %s [max_days] <file1.csv> <file2.csv> ... <fileN.csv>\n", argv[0]);
+    if (argc != 2) {
+        printf("Usage: %s <stocks_directory>\n", argv[0]);
         return 1;
     }
 
-    int num_files = argc - file_start_index;
+    const char *dirpath = argv[1];
 
-    int threads   = omp_get_max_threads();
+    DIR *dir = opendir(dirpath);
+    if (!dir) {
+        fprintf(stderr, "Cannot open directory: %s\n", dirpath);
+        return 1;
+    }
 
-    /*
-      Global accumulators:
-      - All files contribute to these values.
-      - We will combine them using OpenMP reduction.
-    */
-    long long total_records   = 0;
-    long long total_returns   = 0;
-    double    sum_prices      = 0.0;
-    double    sum_returns     = 0.0;
-    double    sum_returns_sq  = 0.0;
+    struct dirent *entry;
+    char filepath[1024];
 
-    double start_time = omp_get_wtime();   // Measure parallel region time
+    char **file_list = NULL;
+    int file_count = 0;
+    int file_cap   = 0;
 
-    
-    #pragma omp parallel for reduction(+:total_records, total_returns, sum_prices, sum_returns, sum_returns_sq) schedule(dynamic)
-    for (int f = file_start_index; f < argc; f++) {
-        const char *filename = argv[f];
+    // 1) Collect all CSV files in directory
+    while ((entry = readdir(dir)) != NULL) {
+        const char *name = entry->d_name;
 
-        // Each thread has its own buffer (no sharing).
-        StockData *data = malloc(sizeof(StockData) * max_days);
-        if (!data) {
+        // Skip "." and ".."
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
             continue;
+
+        // Only keep files ending with ".csv"
+        size_t len = strlen(name);
+        if (len < 4 || strcmp(name + len - 4, ".csv") != 0)
+            continue;
+
+        snprintf(filepath, sizeof(filepath), "%s/%s", dirpath, name);
+
+        // Grow list if needed
+        if (file_count >= file_cap) {
+            int new_cap = (file_cap == 0) ? 128 : file_cap * 2;
+            char **tmp = (char **)realloc(file_list, new_cap * sizeof(char *));
+            if (!tmp) {
+                fprintf(stderr, "Memory allocation failed for file list\n");
+                closedir(dir);
+                for (int i = 0; i < file_count; i++) free(file_list[i]);
+                free(file_list);
+                return 1;
+            }
+            file_list = tmp;
+            file_cap  = new_cap;
         }
 
-        // Read this file (serial inside the thread, but different files are parallel).
-        int n = read_csv(filename, data, max_days);
-        if (n > 1) {
-            long long local_records   = n;
-            long long local_returns   = n - 1;
-            double    local_price_sum = 0.0;
-            double    local_ret_sum   = 0.0;
-            double    local_ret_sq    = 0.0;
+        file_list[file_count] = my_strdup(filepath);
+        if (!file_list[file_count]) {
+            fprintf(stderr, "Memory allocation failed for filepath\n");
+            closedir(dir);
+            for (int i = 0; i < file_count; i++) free(file_list[i]);
+            free(file_list);
+            return 1;
+        }
+        file_count++;
+    }
 
-            // Serial loops inside the thread: outer loop is already parallel.
+    closedir(dir);
+
+    if (file_count == 0) {
+        printf("No CSV files found in directory: %s\n", dirpath);
+        return 0;
+    }
+
+    printf("\nOpenMP Stock Analysis - Market Metrics by Decade (Cleaned)\n");
+    printf("Directory: %s\n", dirpath);
+    printf("Files found: %d\n", file_count);
+    printf("============================================================\n\n");
+
+    // Global accumulators per decade
+    double sum_avg_decade[MAX_DECADES]    = {0.0};
+    long   count_rows_decade[MAX_DECADES] = {0};
+
+    double sum_ret_decade[MAX_DECADES]    = {0.0};
+    double sum_ret_sq_decade[MAX_DECADES] = {0.0};
+    long   count_ret_decade[MAX_DECADES]  = {0};
+
+    int global_min_year = 9999;
+    int global_max_year = 0;
+
+    double start = omp_get_wtime();
+
+    // 2) Parallel region: process files in parallel
+    #pragma omp parallel
+    {
+        // Thread-local accumulators
+        double local_sum_avg[MAX_DECADES]    = {0.0};
+        long   local_rows[MAX_DECADES]       = {0};
+
+        double local_sum_ret[MAX_DECADES]    = {0.0};
+        double local_sum_ret_sq[MAX_DECADES] = {0.0};
+        long   local_ret_count[MAX_DECADES]  = {0};
+
+        int local_min_year = 9999;
+        int local_max_year = 0;
+
+        // Use runtime schedule so it can be controlled via OMP_SCHEDULE
+        #pragma omp for schedule(runtime)
+        for (int idx_file = 0; idx_file < file_count; idx_file++) {
+
+            const char *filename = file_list[idx_file];
+
+            StockData *data = NULL;
+            int n = read_csv(filename, &data);
+            if (n <= 1 || !data) {
+                if (data) free(data);
+                continue;
+            }
+
+            // Local min/max year for this thread
             for (int i = 0; i < n; i++) {
-                local_price_sum += daily_average(data[i]);
+                int year = 0;
+                sscanf(data[i].date, "%d", &year);
+                if (year < local_min_year) local_min_year = year;
+                if (year > local_max_year) local_max_year = year;
             }
 
+            // Collect daily average prices per decade
+            for (int i = 0; i < n; i++) {
+                double o = data[i].open;
+                double h = data[i].high;
+                double l = data[i].low;
+                double c = data[i].close;
+
+                int year = 0;
+                sscanf(data[i].date, "%d", &year);
+
+                if (year < MIN_YEAR_GLOBAL || year > MAX_YEAR_GLOBAL)
+                    continue;
+
+                int decade_index = (year - MIN_YEAR_GLOBAL) / 10;
+                if (decade_index < 0 || decade_index >= MAX_DECADES)
+                    continue;
+
+                // Filter unrealistic prices
+                if (o >= MIN_PRICE && o <= MAX_PRICE &&
+                    h >= MIN_PRICE && h <= MAX_PRICE &&
+                    l >= MIN_PRICE && l <= MAX_PRICE &&
+                    c >= MIN_PRICE && c <= MAX_PRICE)
+                {
+                    double avg = (o + h + l + c) / 4.0;
+                    local_sum_avg[decade_index]    += avg;
+                    local_rows[decade_index]       += 1;
+                }
+            }
+
+            // Collect daily returns per decade
             for (int i = 0; i < n - 1; i++) {
-                double r = daily_return(data[i].close, data[i + 1].close);
-                local_ret_sum  += r;
-                local_ret_sq   += r * r;
+                double p = data[i].close;
+                double q = data[i + 1].close;
+
+                int year = 0;
+                sscanf(data[i].date, "%d", &year);
+
+                if (year < MIN_YEAR_GLOBAL || year > MAX_YEAR_GLOBAL)
+                    continue;
+
+                int decade_index = (year - MIN_YEAR_GLOBAL) / 10;
+                if (decade_index < 0 || decade_index >= MAX_DECADES)
+                    continue;
+
+                if (p >= MIN_PRICE && p <= MAX_PRICE &&
+                    q >= MIN_PRICE && q <= MAX_PRICE &&
+                    p != 0.0)
+                {
+                    double r = (q - p) / p;
+
+                    // Exclude extreme outliers (> 100% daily move)
+                    if (fabs(r) > 1.0)
+                        continue;
+
+                    local_sum_ret[decade_index]    += r;
+                    local_sum_ret_sq[decade_index] += r * r;
+                    local_ret_count[decade_index]  += 1;
+                }
             }
 
-            /*
-              These additions are part of the reduction:
-              -   each thread has a private copy.
-              - OpenMP merges them when the loop finishes.
-            */
-            total_records   += local_records;
-            total_returns   += local_returns;
-            sum_prices      += local_price_sum;
-            sum_returns     += local_ret_sum;
-            sum_returns_sq  += local_ret_sq;
+            free(data);
+        } // end for files
+
+        // Merge local results into global arrays
+        #pragma omp critical
+        {
+            for (int d = 0; d < MAX_DECADES; d++) {
+                sum_avg_decade[d]    += local_sum_avg[d];
+                count_rows_decade[d] += local_rows[d];
+
+                sum_ret_decade[d]    += local_sum_ret[d];
+                sum_ret_sq_decade[d] += local_sum_ret_sq[d];
+                count_ret_decade[d]  += local_ret_count[d];
+            }
+
+            if (local_min_year < global_min_year) global_min_year = local_min_year;
+            if (local_max_year > global_max_year) global_max_year = local_max_year;
+        }
+    } // end parallel
+
+    double end = omp_get_wtime();
+
+    // 3) Print market summary by decade
+    printf("Market Summary by Decade (OpenMP):\n");
+    printf("------------------------------------------------------------\n");
+
+    int first_decade = (global_min_year / 10) * 10;
+    int last_decade  = 2010;  // final printed period: 2010–2020
+
+    for (int decade_start = first_decade; decade_start <= last_decade; decade_start += 10) {
+        int d_idx = (decade_start - MIN_YEAR_GLOBAL) / 10;
+        if (d_idx < 0 || d_idx >= MAX_DECADES)
+            continue;
+
+        long rows = count_rows_decade[d_idx];
+        long rets = count_ret_decade[d_idx];
+
+        if (rows == 0 && rets == 0)
+            continue;
+
+        double mean_price = 0.0;
+        double vol = 0.0;
+        double mean_r = 0.0;
+        double annual_r = 0.0;
+
+        if (rows > 0) {
+            mean_price = sum_avg_decade[d_idx] / (double)rows;
         }
 
-        free(data); // Free per-thread memory
+        if (rets > 0) {
+            mean_r  = sum_ret_decade[d_idx] / (double)rets;
+            double mean_r2 = sum_ret_sq_decade[d_idx] / (double)rets;
+            double var = mean_r2 - mean_r * mean_r;
+            if (var < 0.0) var = 0.0;
+            vol = sqrt(var);
+
+            annual_r = mean_r * 252.0; // approximate annualization
+        }
+
+        int decade_end = (decade_start == 2010) ? 2020 : (decade_start + 9);
+
+        printf("Decade %d–%d:\n", decade_start, decade_end);
+        printf("  Rows used:             %ld\n", rows);
+        printf("  Mean market price:     %.4f\n", mean_price);
+        printf("  Market volatility:     %.4f (%.4f%%)\n",
+               vol, vol * 100.0);
+
+        if (rets > 0) {
+            printf("  Mean daily return:     %.6f (%.4f%%)\n",
+                   mean_r, mean_r * 100.0);
+            printf("  Approx annual return:  %.6f (%.4f%%)\n\n",
+                   annual_r, annual_r * 100.0);
+        } else {
+            printf("  Mean daily return:     N/A\n");
+            printf("  Approx annual return:  N/A\n\n");
+        }
     }
 
-    double end_time = omp_get_wtime();
-    double elapsed  = end_time - start_time;
+    printf("Overall Years Range in Data: %d–%d\n", global_min_year, global_max_year);
+    printf("Execution time (OpenMP): %.6f seconds\n", end - start);
 
-   
-    if (total_records == 0 || total_returns == 0) {
-        printf("No sufficient data loaded.\n");
-        return 1;
-    }
-
-    double avg_price = sum_prices / (double)total_records;
-    double mean_ret  = sum_returns / (double)total_returns;
-    double mean_sq   = sum_returns_sq / (double)total_returns;
-
-    double variance  = mean_sq - (mean_ret * mean_ret);
-    if (variance < 0.0) variance = 0.0;
-    double volatility = sqrt(variance);
-
-    printf("OpenMP Stock Analysis (All Files Combined)\n");
-    printf("===========================================\n\n");
-    printf("Files: %d\n", num_files);
-    printf("Max days per file: %d\n", max_days);
-    printf("Threads: %d\n\n", threads);
-
-    printf("Total records loaded: %lld\n", total_records);
-    printf("Average daily price (all files): %.4f\n", avg_price);
-    printf("Volatility (std. dev of returns): %.6f\n", volatility);
-    printf("Volatility (percentage): %.4f%%\n", volatility * 100.0);
-    printf("Execution time (OpenMP): %.6f seconds\n", elapsed);
-    printf("===========================================\n");
+    for (int i = 0; i < file_count; i++) free(file_list[i]);
+    free(file_list);
 
     return 0;
 }
 
-// gcc -O3 -fopenmp open_mp.c -o omp
+
+// gcc -O3 -fopenmp openMP_Version.c -o omp
 // export OMP_NUM_THREADS=2
 // export OMP_NUM_THREADS=4
 // export OMP_NUM_THREADS=8
@@ -177,4 +359,4 @@ int main(int argc, char *argv[]) {
 // export OMP_SCHEDULE="static,1000"
 // export OMP_SCHEDULE="dynamic,1000"
 // export OMP_SCHEDULE="guided,1000"   
-// ./omp stock_data.csv
+// ./omp stocks
